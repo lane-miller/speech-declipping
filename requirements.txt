@@ -9,3 +9,4 @@ jupyterlab
 ipykernel
 soundfile
 librosa
+ipympl
