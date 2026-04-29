@@ -10,3 +10,5 @@ ipykernel
 soundfile
 librosa
 ipympl
+plotly
+pesq
