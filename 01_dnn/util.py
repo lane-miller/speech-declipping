@@ -197,7 +197,8 @@ class DeclipNet(nn.Module):
                     nn.init.zeros_(m.bias)
             elif isinstance(m, nn.Linear):
                 nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
-                nn.init.zeros_(m.bias)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
             
     def forward(self, x):
         # Encoder + store skips
