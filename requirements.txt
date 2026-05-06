@@ -12,3 +12,4 @@ librosa
 ipympl
 plotly
 pesq
+pytorch_wavelets
