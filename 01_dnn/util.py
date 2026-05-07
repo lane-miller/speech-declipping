@@ -11,13 +11,18 @@ Contents:
 """
 
 # Imports
+import sys
 import json
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from pathlib import Path
+
+sys.path.insert(0, "..")
+from config import *
 
 # =============================================================================
 # Dataset
@@ -344,7 +349,35 @@ def dwt_loss(output, target, wavelet='db4', levels=4, weight_power=1.0):
 
     return total_loss
 
-
+# Define loss function options
+def make_loss_fn(config_name):
+    if config_name == "l1":
+        return lambda out, tgt, clip: l1_loss(out, tgt)
+    elif config_name == "weighted_l1":
+        return lambda out, tgt, clip: weighted_l1_loss(out, tgt, clip, weight_power=1.0)
+    elif config_name == "weighted_l1_p2":
+        return lambda out, tgt, clip: weighted_l1_loss(out, tgt, clip, weight_power=2.0)
+    elif config_name == "weighted_l1_p4":
+        return lambda out, tgt, clip: weighted_l1_loss(out, tgt, clip, weight_power=4.0)
+    elif config_name == "l1_stft":
+        return lambda out, tgt, clip: l1_loss(out, tgt) + multires_stft_loss(out, tgt, weight_power=0.0)
+    elif config_name == "l1_dwt":
+        return lambda out, tgt, clip: l1_loss(out, tgt) + dwt_loss(out, tgt, weight_power=0.0)
+    elif config_name == "l1_stft_weighted":
+        return lambda out, tgt, clip: l1_loss(out, tgt) + multires_stft_loss(out, tgt, weight_power=1.0)
+    elif config_name == "l1_dwt_weighted":
+        return lambda out, tgt, clip: l1_loss(out, tgt) + dwt_loss(out, tgt, weight_power=1.0)
+    elif config_name == "weighted_l1_stft":
+        return lambda out, tgt, clip: weighted_l1_loss(out, tgt, clip, weight_power=1.0) + multires_stft_loss(out, tgt, weight_power=0.0)
+    elif config_name == "weighted_l1_dwt":
+        return lambda out, tgt, clip: weighted_l1_loss(out, tgt, clip, weight_power=1.0) + dwt_loss(out, tgt, weight_power=0.0)
+    elif config_name == "weighted_l1_stft_weighted":
+        return lambda out, tgt, clip: weighted_l1_loss(out, tgt, clip, weight_power=1.0) + multires_stft_loss(out, tgt, weight_power=1.0)
+    elif config_name == "weighted_l1_dwt_weighted":
+        return lambda out, tgt, clip: weighted_l1_loss(out, tgt, clip, weight_power=1.0) + dwt_loss(out, tgt, weight_power=1.0)
+    else:
+        raise ValueError(f"Unknown loss config: {config_name}")
+        
 # =============================================================================
 # Metrics
 # =============================================================================
@@ -371,3 +404,85 @@ def si_sdr(reference, degraded):
     return 10 * torch.log10(
         (signal ** 2).sum(dim=-1) / (noise ** 2).sum(dim=-1).clamp(min=1e-8)
     ).squeeze(-1)
+
+
+# =============================================================================
+# Training
+# =============================================================================
+
+def train_run(run_name, loss_fn, train_loader, val_loader, device,
+              lr=1e-3, patience=10, min_delta=1e-3,
+              h=8, n_attn=3, num_heads=4, ffn_dim=256):
+    
+    run_dir = STUDY_OUT / run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    
+    results_path = run_dir / "results.json"
+    if results_path.exists():
+        print(f"{run_name} already completed, skipping.")
+        return
+    
+    torch.manual_seed(42)
+    model = DeclipNet(H=h, N=n_attn, num_heads=num_heads, ffn_dim=ffn_dim).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    
+    train_loss_history = []
+    val_sdr_history = []
+    best_val_sdr = -float("inf")
+    epochs_no_improve = 0
+    epoch = 0
+    
+    while epochs_no_improve < patience:
+        # Training
+        model.train()
+        epoch_loss = 0.0
+        for clipped, clean in train_loader:
+            clipped, clean = clipped.to(device), clean.to(device)
+            optimizer.zero_grad()
+            output = model(clipped)
+            loss = loss_fn(output, clean, clipped)
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item()
+        
+        epoch_loss /= len(train_loader)
+        train_loss_history.append(epoch_loss)
+        
+        # Validation
+        model.eval()
+        total_sdr = 0.0
+        total_count = 0
+        with torch.no_grad():
+            for clipped, clean in val_loader:
+                clipped, clean = clipped.to(device), clean.to(device)
+                output = model(clipped)
+                scores = si_sdr(clean, output)
+                total_sdr += scores.sum().item()
+                total_count += scores.numel()
+        
+        val_sdr = total_sdr / total_count
+        val_sdr_history.append(val_sdr)
+        
+        # Early stopping
+        if val_sdr > best_val_sdr + min_delta:
+            best_val_sdr = val_sdr
+            epochs_no_improve = 0
+            torch.save(model.state_dict(), run_dir / "best_model.pt")
+        else:
+            epochs_no_improve += 1
+        
+        epoch += 1
+        print(f"[{run_name}] epoch {epoch:03d} | loss: {epoch_loss:.6f} | val SI-SDR: {val_sdr:.4f} dB | best: {best_val_sdr:.4f} dB | no improve: {epochs_no_improve}/{patience}", flush=True)
+    
+    # Save results
+    results = {
+        "run_name": run_name,
+        "best_val_sdr": best_val_sdr,
+        "train_loss_history": train_loss_history,
+        "val_sdr_history": val_sdr_history,
+        "epochs": epoch,
+    }
+    with open(results_path, "w") as f:
+        json.dump(results, f, indent=2)
+    
+    print(f"{run_name} complete. Best val SI-SDR: {best_val_sdr:.4f} dB")
