@@ -359,22 +359,24 @@ def make_loss_fn(config_name):
         return lambda out, tgt, clip: weighted_l1_loss(out, tgt, clip, weight_power=2.0)
     elif config_name == "weighted_l1_p4":
         return lambda out, tgt, clip: weighted_l1_loss(out, tgt, clip, weight_power=4.0)
-    elif config_name == "l1_stft":
-        return lambda out, tgt, clip: l1_loss(out, tgt) + multires_stft_loss(out, tgt, weight_power=0.0)
     elif config_name == "l1_dwt":
-        return lambda out, tgt, clip: l1_loss(out, tgt) + dwt_loss(out, tgt, weight_power=0.0)
-    elif config_name == "l1_stft_weighted":
-        return lambda out, tgt, clip: l1_loss(out, tgt) + multires_stft_loss(out, tgt, weight_power=1.0)
+        return lambda out, tgt, clip: l1_loss(out, tgt) + 0.5 * dwt_loss(out, tgt, weight_power=0.0)
     elif config_name == "l1_dwt_weighted":
-        return lambda out, tgt, clip: l1_loss(out, tgt) + dwt_loss(out, tgt, weight_power=1.0)
-    elif config_name == "weighted_l1_stft":
-        return lambda out, tgt, clip: weighted_l1_loss(out, tgt, clip, weight_power=1.0) + multires_stft_loss(out, tgt, weight_power=0.0)
+        return lambda out, tgt, clip: l1_loss(out, tgt) + 0.5 * dwt_loss(out, tgt, weight_power=1.0)
     elif config_name == "weighted_l1_dwt":
-        return lambda out, tgt, clip: weighted_l1_loss(out, tgt, clip, weight_power=1.0) + dwt_loss(out, tgt, weight_power=0.0)
-    elif config_name == "weighted_l1_stft_weighted":
-        return lambda out, tgt, clip: weighted_l1_loss(out, tgt, clip, weight_power=1.0) + multires_stft_loss(out, tgt, weight_power=1.0)
+        return lambda out, tgt, clip: weighted_l1_loss(out, tgt, clip, weight_power=1.0) + 0.5 * dwt_loss(out, tgt, weight_power=0.0)
+    elif config_name == "weighted_l1_dwt_level5":
+        return lambda out, tgt, clip: weighted_l1_loss(out, tgt, clip, weight_power=1.0) + 0.5 * dwt_loss(out, tgt, weight_power=0.0, levels=5)
     elif config_name == "weighted_l1_dwt_weighted":
-        return lambda out, tgt, clip: weighted_l1_loss(out, tgt, clip, weight_power=1.0) + dwt_loss(out, tgt, weight_power=1.0)
+        return lambda out, tgt, clip: weighted_l1_loss(out, tgt, clip, weight_power=1.0) + 0.5 * dwt_loss(out, tgt, weight_power=1.0)
+    elif config_name == "weighted_l1_stft":
+        return lambda out, tgt, clip: weighted_l1_loss(out, tgt, clip, weight_power=1.0) + (1/20) * multires_stft_loss(out, tgt, weight_power=0.0)
+    elif config_name == "weighted_l1_stft_weighted":
+        return lambda out, tgt, clip: weighted_l1_loss(out, tgt, clip, weight_power=1.0) + (1/20) * multires_stft_loss(out, tgt, weight_power=1.0)
+    elif config_name == "l1_stft":
+        return lambda out, tgt, clip: l1_loss(out, tgt) + (1/20) * multires_stft_loss(out, tgt, weight_power=0.0)
+    elif config_name == "l1_stft_weighted":
+        return lambda out, tgt, clip: l1_loss(out, tgt) + (1/20) * multires_stft_loss(out, tgt, weight_power=1.0)
     else:
         raise ValueError(f"Unknown loss config: {config_name}")
         
