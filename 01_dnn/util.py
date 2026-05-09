@@ -385,55 +385,78 @@ def make_loss_fn(config_name):
 # =============================================================================
 
 def si_sdr(reference, degraded):
-    """
-    Scale-invariant signal-to-distortion ratio.
-    Higher is better. Returns per-example values in dB.
-
-    Args:
-        reference: clean reference tensor (batch, 1, BS) or (1, BS)
-        degraded:  degraded/output tensor, same shape as reference
-
-    Returns:
-        Tensor of shape (batch,) with SI-SDR in dB for each example.
-    """
     reference = reference - reference.mean(dim=-1, keepdim=True)
     degraded = degraded - degraded.mean(dim=-1, keepdim=True)
-    dot = (degraded * reference).sum(dim=-1, keepdim=True)
-    s_ref = (reference * reference).sum(dim=-1, keepdim=True).clamp(min=1e-8)
-    alpha = dot / s_ref
-    signal = alpha * reference
+    alpha = (degraded * reference).sum(dim=-1) / (reference * reference).sum(dim=-1).clamp(min=1e-8)
+    signal = alpha.unsqueeze(-1) * reference
     noise = degraded - signal
-    return 10 * torch.log10(
+    sdr = 10 * torch.log10(
         (signal ** 2).sum(dim=-1) / (noise ** 2).sum(dim=-1).clamp(min=1e-8)
-    ).squeeze(-1)
+    )
+    return sdr.squeeze().clamp(min=-100.0)  # (batch, 1) -> (batch,)
 
 
 # =============================================================================
 # Training
 # =============================================================================
 
-def train_run(run_name, loss_fn, train_loader, val_loader, device,
+def train_run(run_name, loss_fn, train_loader, val_loader, device, study_out=STUDY_OUT,
               lr=1e-3, patience=10, min_delta=1e-3,
-              h=8, n_attn=3, num_heads=4, ffn_dim=256):
-    
-    run_dir = STUDY_OUT / run_name
+              h=8, n_attn=3, num_heads=4, ffn_dim=256,
+              lr_scheduling=False, val_every=1,
+              compile_model=False, grad_clip=None):
+    """
+    Training loop for DeclipNet.
+
+    Args:
+        run_name:      identifier for this run, used for saving checkpoints and results
+        loss_fn:       callable (output, target, clipped) -> scalar loss
+        train_loader:  DataLoader for training set
+        val_loader:    DataLoader for validation set
+        device:        torch device
+        study_out:     Path to directory where run results are saved
+        lr:            initial learning rate
+        patience:      validation checks without improvement before early stopping
+                       effective epoch patience = patience * val_every
+        min_delta:     minimum SI-SDR improvement to count as progress
+        h:             base channel count for DeclipNet
+        n_attn:        number of self-attention blocks
+        num_heads:     number of attention heads
+        ffn_dim:       feed-forward dimension in attention blocks
+        lr_scheduling: if True, use ReduceLROnPlateau to reduce LR on val SI-SDR plateau
+        val_every:     evaluate val SI-SDR every N epochs (default 1)
+        compile_model: if True, apply torch.compile to model before training
+        grad_clip:     if not None, clip gradient norm to this value before optimizer step
+    """
+    run_dir = study_out / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
-    
+
     results_path = run_dir / "results.json"
     if results_path.exists():
         print(f"{run_name} already completed, skipping.")
         return
-    
+
     torch.manual_seed(42)
     model = DeclipNet(H=h, N=n_attn, num_heads=num_heads, ffn_dim=ffn_dim).to(device)
+    if compile_model:
+        model = torch.compile(model)
+
     optimizer = optim.Adam(model.parameters(), lr=lr)
-    
+
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='max', factor=0.5, patience=5, min_lr=1e-6
+    ) if lr_scheduling else None
+
     train_loss_history = []
     val_sdr_history = []
+    lr_history = []
     best_val_sdr = -float("inf")
     epochs_no_improve = 0
     epoch = 0
-    
+    val_sdr = 0.0
+
+    # patience counts validation checks, not epochs
+    # effective epoch patience = patience * val_every
     while epochs_no_improve < patience:
         # Training
         model.train()
@@ -444,47 +467,64 @@ def train_run(run_name, loss_fn, train_loader, val_loader, device,
             output = model(clipped)
             loss = loss_fn(output, clean, clipped)
             loss.backward()
+            if grad_clip is not None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
             optimizer.step()
             epoch_loss += loss.item()
-        
+            del clipped, clean, output, loss
+
         epoch_loss /= len(train_loader)
         train_loss_history.append(epoch_loss)
-        
-        # Validation
-        model.eval()
-        total_sdr = 0.0
-        total_count = 0
-        with torch.no_grad():
-            for clipped, clean in val_loader:
-                clipped, clean = clipped.to(device), clean.to(device)
-                output = model(clipped)
-                scores = si_sdr(clean, output)
-                total_sdr += scores.sum().item()
-                total_count += scores.numel()
-        
-        val_sdr = total_sdr / total_count
-        val_sdr_history.append(val_sdr)
-        
-        # Early stopping
-        if val_sdr > best_val_sdr + min_delta:
-            best_val_sdr = val_sdr
-            epochs_no_improve = 0
-            torch.save(model.state_dict(), run_dir / "best_model.pt")
-        else:
-            epochs_no_improve += 1
-        
         epoch += 1
-        print(f"[{run_name}] epoch {epoch:03d} | loss: {epoch_loss:.6f} | val SI-SDR: {val_sdr:.4f} dB | best: {best_val_sdr:.4f} dB | no improve: {epochs_no_improve}/{patience}", flush=True)
-    
-    # Save results
+
+        current_lr = optimizer.param_groups[0]['lr']
+        lr_history.append(current_lr)
+
+        # Validation
+        if epoch % val_every == 0:
+            model.eval()
+            total_sdr = 0.0
+            total_count = 0
+            with torch.no_grad():
+                for clipped, clean in val_loader:
+                    clipped, clean = clipped.to(device), clean.to(device)
+                    output = model(clipped)
+                    scores = si_sdr(clean, output)
+                    total_sdr += scores.sum().item()
+                    total_count += scores.numel()
+                    del clipped, clean, output, scores
+
+            val_sdr = total_sdr / total_count
+
+            if scheduler is not None:
+                scheduler.step(val_sdr)
+
+            if val_sdr > best_val_sdr + min_delta:
+                best_val_sdr = val_sdr
+                epochs_no_improve = 0
+                torch.save(model.state_dict(), run_dir / "best_model.pt")
+            else:
+                epochs_no_improve += 1
+
+        val_sdr_history.append(val_sdr)
+
+        print(f"[{run_name}] epoch {epoch:03d} | loss: {epoch_loss:.6f} | "
+              f"val SI-SDR: {val_sdr:.4f} dB | best: {best_val_sdr:.4f} dB | "
+              f"lr: {current_lr:.2e} | no improve: {epochs_no_improve}/{patience} "
+              f"({epochs_no_improve * val_every}/{patience * val_every} epochs)",
+              flush=True)
+
+    # Save final results
     results = {
         "run_name": run_name,
         "best_val_sdr": best_val_sdr,
         "train_loss_history": train_loss_history,
         "val_sdr_history": val_sdr_history,
+        "lr_history": lr_history,
         "epochs": epoch,
+        "complete": True
     }
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2)
-    
+
     print(f"{run_name} complete. Best val SI-SDR: {best_val_sdr:.4f} dB")
