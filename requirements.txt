@@ -13,3 +13,6 @@ ipympl
 plotly
 pesq
 pytorch_wavelets
+onnx
+onnxruntime
+coremltools
