@@ -2,8 +2,8 @@ numpy
 scipy
 pandas
 matplotlib
-torch
-torchaudio
+torch==2.11.0
+torchaudio==2.11.0
 scikit-learn
 jupyterlab
 ipykernel
@@ -11,8 +11,8 @@ soundfile
 librosa
 ipympl
 plotly
-pesq
-pytorch_wavelets
-onnx
-onnxruntime
-coremltools
+pesq==0.0.4
+pytorch_wavelets==1.3.0
+onnx==1.21.0
+onnxruntime==1.23.2
+coremltools==9.0  # macOS only (Core ML export/benchmarking in 02_deployment/)

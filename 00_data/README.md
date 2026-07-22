@@ -19,3 +19,5 @@ Scripts and notebooks for building, verifying, and analyzing the speech-declippi
 
 
 - **`00_routing_analysis.ipynb`** — Empirically determines bypass threshold ε by sampling non-test utterances across a grid of clipping severities and measuring f_c (fraction clipped), PESQ MOS as function of f_c
+
+![f_c vs PESQ MOS and f_c vs SI-SDR, used to determine the bypass threshold](assets/routing_threshold.png)
